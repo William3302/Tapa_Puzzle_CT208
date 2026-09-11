@@ -1,7 +1,9 @@
+import os
+import glob
 import copy
 import sys
 
-# Força o terminal a aceitar o bloco visual do Tapa
+# Força o terminal a aceitar o formato visual UTF-8
 sys.stdout.reconfigure(encoding='utf-8')
 
 UNKNOWN = 0
@@ -16,28 +18,29 @@ class TapaSolver:
         self._parse_input(ascii_input)
         
     def _parse_input(self, text):
+        """Lê o formato CSV. Células vazias viram UNKNOWN. '24' vira (2,4)."""
         linhas = text.strip().split('\n')
         self.rows = len(linhas)
-        self.cols = len(linhas[0].split())
+        self.cols = max(len(linha.split(',')) for linha in linhas)
         
         for r in range(self.rows):
             linha_grid = []
-            colunas = linhas[r].split()
+            colunas = linhas[r].split(',')
             for c in range(self.cols):
-                celula = colunas[c]
-                if celula == '.':
+                celula = colunas[c].strip() if c < len(colunas) else ""
+                
+                if celula == '':
                     linha_grid.append(UNKNOWN)
                 else:
                     linha_grid.append(WHITE)
                     if celula == '?':
                         self.clues[(r, c)] = ('?',)
                     else:
-                        dicas = tuple(int(x) for x in celula.split(','))
+                        dicas = tuple(int(x) for x in celula)
                         self.clues[(r, c)] = dicas
             self.grid.append(linha_grid)
 
     def apply_deterministic_engine(self):
-        """Aplica regras absolutas até travar. (Inalterado)"""
         mudou = True
         while mudou:
             mudou = False
@@ -56,7 +59,8 @@ class TapaSolver:
             for (r, c), clue in self.clues.items():
                 if clue == ('?',): continue
                 total_exigido = sum(clue)
-                max_bloco = max(clue)
+                max_bloco = max(clue) if total_exigido > 0 else 0
+                
                 vizinhos = []
                 dirs = [(-1,-1), (-1,0), (-1,1), (0,1), (1,1), (1,0), (1,-1), (0,-1)]
                 for dr, dc in dirs:
@@ -95,16 +99,9 @@ class TapaSolver:
         return True
 
     def is_viable_connectivity(self):
-        """
-        NOVO FILTRO: Avalia se ainda é matematicamente possível conectar o mar.
-        Se houverem duas áreas pretas que não podem se tocar nem usando
-        as casas vazias, corta o galho da árvore na mesma hora.
-        """
         blacks = [(r, c) for r in range(self.rows) for c in range(self.cols) if self.grid[r][c] == BLACK]
         if not blacks: return True
         
-        # Faz um "Flood Fill" a partir da primeira célula preta,
-        # caminhando apenas por células PRETAS ou DESCONHECIDAS.
         start = blacks[0]
         visited = set()
         stack = [start]
@@ -119,15 +116,12 @@ class TapaSolver:
                         if self.grid[nr][nc] in (BLACK, UNKNOWN) and (nr, nc) not in visited:
                             stack.append((nr, nc))
                             
-        # Se alguma célula preta existente ficou de fora da área alcançável,
-        # significa que o mar foi permanentemente cortado por paredes brancas.
         for b in blacks:
             if b not in visited:
                 return False
         return True
 
     def check_connectivity(self):
-        """Verificação estrita de final de jogo (apenas peças pretas)."""
         blacks = [(r, c) for r in range(self.rows) for c in range(self.cols) if self.grid[r][c] == BLACK]
         if not blacks: return True
         visited = set()
@@ -185,7 +179,6 @@ class TapaSolver:
             self.grid = backup_grid
             return False
 
-        # NOVA PODA: Valida a conectividade das casas que ainda estão vazias
         if not self.is_viable_connectivity():
             self.grid = backup_grid
             return False
@@ -193,9 +186,6 @@ class TapaSolver:
         if self.is_solved():
             return True
 
-        # NOVA HEURÍSTICA: Escolhe a célula vazia com mais "informação" em volta (MRV)
-        # Isso faz o algoritmo preencher os arredores das dicas primeiro,
-        # em vez de chutar aleatoriamente num canto vazio do tabuleiro.
         best_r, best_c = -1, -1
         max_neighbors_filled = -1
         
@@ -219,7 +209,6 @@ class TapaSolver:
             self.grid = backup_grid
             return False
 
-        # Tenta Preta primeiro (heurística: em geral, há mais pretas que brancas no mar)
         self.grid[best_r][best_c] = BLACK
         if self.solve(): return True
             
@@ -230,34 +219,86 @@ class TapaSolver:
         self.grid = backup_grid
         return False
 
-    def print_board(self):
-        simbolos = {UNKNOWN: '.', BLACK: '█', WHITE: ' '}
-        for r in range(self.rows):
-            linha = ""
-            for c in range(self.cols):
-                if (r, c) in self.clues:
-                    dica = ",".join(map(str, self.clues[(r, c)]))
-                    linha += f"[{dica:^3}]"
+    def save_solution_to_file(self, filename="solucao_tapa.txt"):
+        """Salva a solução no formato binário contínuo (ex: 000100)."""
+        with open(filename, 'w', encoding='utf-8') as f:
+            for r in range(self.rows):
+                linha_formatada = []
+                for c in range(self.cols):
+                    if self.grid[r][c] == BLACK:
+                        linha_formatada.append('1')
+                    else:
+                        linha_formatada.append('0')
+                
+                linha_string = "".join(linha_formatada)
+                
+                print(linha_string)         
+                f.write(linha_string + "\n") 
+
+        print(f"\n[!] A matriz da solução foi salva com sucesso no arquivo: '{filename}'")
+
+# ==========================================
+# GESTOR DE TESTE EM LOTE
+# ==========================================
+
+def testar_dataset_em_lote(pasta_dataset="dataset_tapa"):
+    """
+    Varre a pasta em busca de instâncias, as resolve e compara com 
+    o gabarito _sol correspondente.
+    """
+    if not os.path.exists(pasta_dataset):
+        print(f"Pasta '{pasta_dataset}' não encontrada. Crie a pasta e adicione os arquivos.")
+        return
+
+    # Busca todos os arquivos de texto/csv que não terminam com "_sol"
+    arquivos = glob.glob(os.path.join(pasta_dataset, "*.*"))
+    arquivos_problema = [f for f in arquivos if not f.endswith(("_sol.txt", "_sol.csv"))]
+    
+    if not arquivos_problema:
+        print(f"Nenhum arquivo de problema encontrado na pasta '{pasta_dataset}'.")
+        return
+
+    print(f"Iniciando testes em {len(arquivos_problema)} tabuleiros...\n")
+
+    for arq_prob in arquivos_problema:
+        nome_base, ext = os.path.splitext(arq_prob)
+        arq_sol = f"{nome_base}_sol{ext}"
+        
+        print(f"Resolvendo: {os.path.basename(arq_prob)}")
+        
+        with open(arq_prob, 'r', encoding='utf-8') as f:
+            conteudo = f.read()
+            
+        solver = TapaSolver(conteudo)
+        sucesso = solver.solve()
+        
+        if sucesso:
+            print(f" -> Sucesso! Resolvido em {solver.nodes_visited} nós.")
+            solver.save_solution_to_file(f"{nome_base}_output_gerado{ext}")
+            
+            # Validação caso o gabarito _sol exista
+            if os.path.exists(arq_sol):
+                with open(arq_sol, 'r', encoding='utf-8') as f:
+                    # Remove quebras de linha e trata a string como uma sequência linear de caracteres
+                    gabarito_bruto = f.read().replace('\n', '').strip()
+                    gabarito_linear = list(gabarito_bruto)
+                    
+                # Extrai a solução do solver de forma sequencial
+                solucao_linear = []
+                for r in range(solver.rows):
+                    for c in range(solver.cols):
+                        solucao_linear.append('1' if solver.grid[r][c] == BLACK else '0')
+                
+                # Validação Lógica
+                if solucao_linear == gabarito_linear:
+                    print(" -> [VERIFICADO] A matriz bate exatamente com o arquivo _sol!")
                 else:
-                    linha += f"  {simbolos[self.grid[r][c]]}  "
-            print(linha)
+                    print(" -> [ERRO] A solução difere do gabarito oficial.")
+            else:
+                print(" -> [AVISO] Arquivo de gabarito (_sol) não encontrado para verificação.")
+        else:
+            print(" -> [FALHA] Nenhuma solução válida encontrada.")
+        print("-" * 50)
 
-tabuleiro_texto = """
-. 5 . . 1,2 . . . . .
-. . . . . 1,2,2 3,3 . . 5
-. . . . . . . . . .
-. 1,3 . . . 7 . . . .
-. 1,2,2 . 7 . . . . . 1,1,1
-1,2 . . . . . 5 . 2,4 .
-. . . . 1,4 . . . 3,3 .
-. . . . . . . . . .
-5 . . 1,3 1,2,2 . . . . .
-. . . . . 1,1 . . 5 .
-"""
-
-solver = TapaSolver(tabuleiro_texto)
-if solver.solve():
-    print(f"Solução encontrada após gerar {solver.nodes_visited} nós de busca!")
-    solver.print_board()
-else:
-    print("Nenhuma solução válida encontrada.")
+if __name__ == "__main__":
+    testar_dataset_em_lote("dataset_tapa")
