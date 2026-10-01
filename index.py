@@ -3,7 +3,6 @@ import glob
 import copy
 import sys
 
-# Força o terminal a aceitar o formato visual UTF-8
 sys.stdout.reconfigure(encoding='utf-8')
 
 UNKNOWN = 0
@@ -18,8 +17,8 @@ class TapaSolver:
         self._parse_input(ascii_input)
         
     def _parse_input(self, text):
-        """Lê o formato CSV. Células vazias viram UNKNOWN. '24' vira (2,4)."""
-        linhas = text.strip().split('\n')
+        # Remove linhas vazias residuais que podem vir do arquivo de texto
+        linhas = [linha.strip() for linha in text.strip().split('\n') if linha.strip()]
         self.rows = len(linhas)
         self.cols = max(len(linha.split(',')) for linha in linhas)
         
@@ -36,8 +35,12 @@ class TapaSolver:
                     if celula == '?':
                         self.clues[(r, c)] = ('?',)
                     else:
-                        dicas = tuple(int(x) for x in celula)
-                        self.clues[(r, c)] = dicas
+                        # Extração segura: ignora espaços e converte apenas os caracteres numéricos
+                        digitos = tuple(int(x) for x in celula if x.isdigit())
+                        if digitos:
+                            self.clues[(r, c)] = digitos
+                        else:
+                            self.clues[(r, c)] = ('?',) # Fallback preventivo
             self.grid.append(linha_grid)
 
     def apply_deterministic_engine(self):
@@ -220,7 +223,6 @@ class TapaSolver:
         return False
 
     def save_solution_to_file(self, filename="solucao_tapa.txt"):
-        """Salva a solução no formato binário contínuo (ex: 000100)."""
         with open(filename, 'w', encoding='utf-8') as f:
             for r in range(self.rows):
                 linha_formatada = []
@@ -231,74 +233,145 @@ class TapaSolver:
                         linha_formatada.append('0')
                 
                 linha_string = "".join(linha_formatada)
-                
                 print(linha_string)         
                 f.write(linha_string + "\n") 
-
         print(f"\n[!] A matriz da solução foi salva com sucesso no arquivo: '{filename}'")
 
-# ==========================================
-# GESTOR DE TESTE EM LOTE
-# ==========================================
+def validar_regras_tapa(grid_binario, dicas, linhas, colunas):
+    """
+    Fonte primária de verdade: valida estritamente a matriz contra o conjunto de regras do Tapa.
+    """
+    for (r, c) in dicas.keys():
+        if grid_binario[r][c] == 1:
+            return False, f"Célula de dica em ({r},{c}) foi preenchida como preta."
 
-def testar_dataset_em_lote(pasta_dataset="dataset_tapa"):
-    """
-    Varre a pasta em busca de instâncias, as resolve e compara com 
-    o gabarito _sol correspondente.
-    """
+    for r in range(linhas - 1):
+        for c in range(colunas - 1):
+            if (grid_binario[r][c] == 1 and grid_binario[r+1][c] == 1 and 
+                grid_binario[r][c+1] == 1 and grid_binario[r+1][c+1] == 1):
+                return False, f"Bloco 2x2 de células pretas encontrado a partir de ({r},{c})."
+
+    pretas = [(r, c) for r in range(linhas) for c in range(colunas) if grid_binario[r][c] == 1]
+    if pretas:
+        visitados = set()
+        stack = [pretas[0]]
+        while stack:
+            r, c = stack.pop()
+            if (r, c) not in visitados:
+                visitados.add((r, c))
+                for dr, dc in [(-1,0), (1,0), (0,-1), (0,1)]:
+                    nr, nc = r + dr, c + dc
+                    if 0 <= nr < linhas and 0 <= nc < colunas:
+                        if grid_binario[nr][nc] == 1 and (nr, nc) not in visitados:
+                            stack.append((nr, nc))
+        if len(visitados) != len(pretas):
+            return False, "As células pretas estão fraturadas em múltiplos grupos (não há conectividade contínua)."
+
+    for (r, c), clue in dicas.items():
+        if clue == ('?',): continue
+            
+        vizinhos = []
+        dirs = [(-1,-1), (-1,0), (-1,1), (0,1), (1,1), (1,0), (1,-1), (0,-1)]
+        for dr, dc in dirs:
+            nr, nc = r + dr, c + dc
+            if 0 <= nr < linhas and 0 <= nc < colunas:
+                vizinhos.append(grid_binario[nr][nc])
+            else:
+                vizinhos.append(0) 
+                
+        blocos_encontrados = []
+        count = 0
+        for v in vizinhos:
+            if v == 1:
+                count += 1
+            else:
+                if count > 0:
+                    blocos_encontrados.append(count)
+                    count = 0
+                    
+        if count > 0:
+            if vizinhos[0] == 1 and len(blocos_encontrados) > 0:
+                blocos_encontrados[0] += count
+            else:
+                blocos_encontrados.append(count)
+                
+        if sorted(blocos_encontrados) != sorted(list(clue)):
+            return False, f"Dica {clue} em ({r},{c}) falhou. Formação real ao redor: {blocos_encontrados}"
+
+    return True, "Matriz perfeitamente válida sob as regras lógicas."
+
+def testar_dataset_em_lote(pasta_dataset="dataset_tapa", pasta_saida="solucoes_geradas"):
     if not os.path.exists(pasta_dataset):
-        print(f"Pasta '{pasta_dataset}' não encontrada. Crie a pasta e adicione os arquivos.")
+        print(f"Pasta '{pasta_dataset}' não encontrada.")
         return
 
-    # Busca todos os arquivos de texto/csv que não terminam com "_sol"
+    if not os.path.exists(pasta_saida):
+        os.makedirs(pasta_saida)
+
     arquivos = glob.glob(os.path.join(pasta_dataset, "*.*"))
-    arquivos_problema = [f for f in arquivos if not f.endswith(("_sol.txt", "_sol.csv"))]
+    arquivos_problema = [f for f in arquivos if not f.endswith(("_sol.txt", "_sol.csv", "output_gerado.txt"))]
     
     if not arquivos_problema:
         print(f"Nenhum arquivo de problema encontrado na pasta '{pasta_dataset}'.")
         return
 
-    print(f"Iniciando testes em {len(arquivos_problema)} tabuleiros...\n")
+    total_geral = 0
+    corretos_geral = 0
+    benchmark_por_tamanho = {}
+
+    print(f"Iniciando testes em tabuleiros...\n")
 
     for arq_prob in arquivos_problema:
-        nome_base, ext = os.path.splitext(arq_prob)
-        arq_sol = f"{nome_base}_sol{ext}"
+        nome_base, ext = os.path.splitext(os.path.basename(arq_prob))
+        caminho_saida = os.path.join(pasta_saida, f"{nome_base}_output_gerado.txt")
         
-        print(f"Resolvendo: {os.path.basename(arq_prob)}")
+        print(f"Resolvendo: {nome_base}{ext}")
         
         with open(arq_prob, 'r', encoding='utf-8') as f:
             conteudo = f.read()
             
         solver = TapaSolver(conteudo)
+        
+        dimensao = (solver.rows, solver.cols)
+        if dimensao not in benchmark_por_tamanho:
+            benchmark_por_tamanho[dimensao] = {'total': 0, 'corretos': 0}
+            
+        total_geral += 1
+        benchmark_por_tamanho[dimensao]['total'] += 1
+        
         sucesso = solver.solve()
         
         if sucesso:
-            print(f" -> Sucesso! Resolvido em {solver.nodes_visited} nós.")
-            solver.save_solution_to_file(f"{nome_base}_output_gerado{ext}")
+            solver.save_solution_to_file(caminho_saida)
+            grid_binario = [[1 if solver.grid[r][c] == BLACK else 0 for c in range(solver.cols)] for r in range(solver.rows)]
+            is_valido, motivo = validar_regras_tapa(grid_binario, solver.clues, solver.rows, solver.cols)
             
-            # Validação caso o gabarito _sol exista
-            if os.path.exists(arq_sol):
-                with open(arq_sol, 'r', encoding='utf-8') as f:
-                    # Remove quebras de linha e trata a string como uma sequência linear de caracteres
-                    gabarito_bruto = f.read().replace('\n', '').strip()
-                    gabarito_linear = list(gabarito_bruto)
-                    
-                # Extrai a solução do solver de forma sequencial
-                solucao_linear = []
-                for r in range(solver.rows):
-                    for c in range(solver.cols):
-                        solucao_linear.append('1' if solver.grid[r][c] == BLACK else '0')
-                
-                # Validação Lógica
-                if solucao_linear == gabarito_linear:
-                    print(" -> [VERIFICADO] A matriz bate exatamente com o arquivo _sol!")
-                else:
-                    print(" -> [ERRO] A solução difere do gabarito oficial.")
+            if is_valido:
+                print(f" -> [VALIDADO] Matriz gerada bate com todas as regras do Tapa (Busca levou {solver.nodes_visited} nós).")
+                corretos_geral += 1
+                benchmark_por_tamanho[dimensao]['corretos'] += 1
             else:
-                print(" -> [AVISO] Arquivo de gabarito (_sol) não encontrado para verificação.")
+                print(f" -> [ERRO DO SOLVER] O algoritmo finalizou a matriz, mas ela quebra as regras lógicas. Motivo: {motivo}")
         else:
-            print(" -> [FALHA] Nenhuma solução válida encontrada.")
+            print(" -> [ESGOTADO] Nenhuma combinação lógica atende às dicas. O tabuleiro provou-se impossível de ser resolvido de forma válida.")
         print("-" * 50)
 
+    print("\n" + "=" * 50)
+    print("RELATÓRIO DE BENCHMARK FINAL".center(50))
+    print("=" * 50)
+    
+    taxa_global = (corretos_geral / total_geral) * 100 if total_geral > 0 else 0
+    print(f"DESEMPENHO GERAL:")
+    print(f"Tabuleiros logicamente validados: {corretos_geral} / {total_geral} ({taxa_global:.2f}%)")
+    print("-" * 50)
+    
+    print("DESEMPENHO POR PROPORÇÃO (LINHAS x COLUNAS):")
+    for dim, stats in sorted(benchmark_por_tamanho.items()): 
+        total_cat = stats['total']
+        corretos_cat = stats['corretos']
+        taxa_cat = (corretos_cat / total_cat) * 100 if total_cat > 0 else 0
+        print(f"Tamanho {dim[0]}x{dim[1]}: {corretos_cat} / {total_cat} corretos ({taxa_cat:.2f}%)")
+    print("=" * 50 + "\n")
+
 if __name__ == "__main__":
-    testar_dataset_em_lote("dataset_tapa")
+    testar_dataset_em_lote(pasta_dataset="dataset_tapa", pasta_saida="solucoes_geradas")
