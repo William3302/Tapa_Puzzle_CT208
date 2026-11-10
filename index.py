@@ -2,6 +2,7 @@ import os
 import glob
 import copy
 import sys
+import time
 
 sys.stdout.reconfigure(encoding='utf-8')
 
@@ -79,14 +80,23 @@ class TapaSolver:
                 if len(pretas) > total_exigido: return False
                 if len(pretas) + len(desconhecidas) < total_exigido: return False
                     
-                estados_anel = [v[2] for v in vizinhos] * 2
-                blocos_adjacentes = 0
-                for estado in estados_anel:
+                estados = [v[2] for v in vizinhos]
+                blocos_confirmados = []
+                contagem = 0
+                for estado in estados:
                     if estado == BLACK:
-                        blocos_adjacentes += 1
-                        if blocos_adjacentes > max_bloco: return False
+                        contagem += 1
                     else:
-                        blocos_adjacentes = 0
+                        if contagem > 0:
+                            blocos_confirmados.append(contagem)
+                            contagem = 0
+                if contagem > 0:
+                    if estados[0] == BLACK and blocos_confirmados:
+                        blocos_confirmados[0] += contagem
+                    else:
+                        blocos_confirmados.append(contagem)
+
+                if any(bloco > max_bloco for bloco in blocos_confirmados): return False
 
                 if len(pretas) < total_exigido and (len(pretas) + len(desconhecidas) == total_exigido):
                     for vr, vc, v_estado in desconhecidas:
@@ -162,7 +172,9 @@ class TapaSolver:
         if count > 0:
             if vizinhos[0] == BLACK and len(blocos) > 0: blocos[0] += count
             else: blocos.append(count)
-                
+
+        if clue == (0,):
+            return len(blocos) == 0
         return sorted(blocos) == sorted(list(clue))
 
     def is_solved(self):
@@ -295,83 +307,210 @@ def validar_regras_tapa(grid_binario, dicas, linhas, colunas):
             else:
                 blocos_encontrados.append(count)
                 
-        if sorted(blocos_encontrados) != sorted(list(clue)):
+        if clue == (0,):
+            if blocos_encontrados:
+                return False, f"Dica {clue} em ({r},{c}) falhou (esperava nenhuma célula preta ao redor). Formação real ao redor: {blocos_encontrados}"
+        elif sorted(blocos_encontrados) != sorted(list(clue)):
             return False, f"Dica {clue} em ({r},{c}) falhou. Formação real ao redor: {blocos_encontrados}"
 
     return True, "Matriz perfeitamente válida sob as regras lógicas."
 
-def testar_dataset_em_lote(pasta_dataset="dataset_tapa", pasta_saida="solucoes_geradas"):
-    if not os.path.exists(pasta_dataset):
-        print(f"Pasta '{pasta_dataset}' não encontrada.")
-        return
+def localizar_gabarito(caminho_problema):
+    """
+    Procura um gabarito manual (<nome>_sol.txt ou <nome>_sol.csv) ao lado
+    do arquivo de problema, para comparação opcional com a solução gerada.
+    """
+    pasta = os.path.dirname(caminho_problema)
+    nome_base, _ = os.path.splitext(os.path.basename(caminho_problema))
+    for sufixo in ("_sol.txt", "_sol.csv"):
+        candidato = os.path.join(pasta, f"{nome_base}{sufixo}")
+        if os.path.exists(candidato):
+            return candidato
+    return None
 
+def carregar_grid_solucao(caminho, linhas_esperadas, colunas_esperadas):
+    """
+    Lê um arquivo de solução/gabarito: uma linha de 0/1 por linha do
+    tabuleiro (mesmo formato gravado por save_solution_to_file).
+    Retorna (grid, None) ou (None, motivo_do_erro).
+    """
+    with open(caminho, 'r', encoding='utf-8') as f:
+        linhas_arquivo = [linha.strip() for linha in f if linha.strip()]
+
+    if len(linhas_arquivo) != linhas_esperadas:
+        return None, (f"esperava {linhas_esperadas} linha(s), mas o arquivo "
+                       f"tem {len(linhas_arquivo)}.")
+
+    grid = []
+    for i, linha_str in enumerate(linhas_arquivo):
+        linha_limpa = linha_str.replace(',', '').replace(' ', '')
+        if len(linha_limpa) != colunas_esperadas:
+            return None, (f"linha {i} tem {len(linha_limpa)} coluna(s), "
+                           f"esperava {colunas_esperadas}.")
+        try:
+            valores = [int(ch) for ch in linha_limpa]
+        except ValueError:
+            return None, f"linha {i} contém caracteres fora de 0/1."
+
+        if any(v not in (0, 1) for v in valores):
+            return None, f"linha {i} contém valores fora de 0/1."
+
+        grid.append(valores)
+
+    return grid, None
+
+def resolver_e_verificar(caminho_problema, pasta_saida="solucoes_geradas"):
+    """
+    Resolve um único arquivo de problema e imediatamente testa o resultado:
+      1) contra as regras lógicas do Tapa (validar_regras_tapa);
+      2) contra um gabarito manual (_sol.txt/_sol.csv), se existir ao lado
+         do problema.
+    Retorna um dict com o resumo da verificação, usado tanto pelo modo
+    individual quanto pelo lote.
+    """
+    nome_base, ext = os.path.splitext(os.path.basename(caminho_problema))
     if not os.path.exists(pasta_saida):
         os.makedirs(pasta_saida)
+    caminho_saida = os.path.join(pasta_saida, f"{nome_base}_output_gerado.txt")
+
+    print(f"Resolvendo: {nome_base}{ext}")
+
+    with open(caminho_problema, 'r', encoding='utf-8') as f:
+        conteudo = f.read()
+
+    solver = TapaSolver(conteudo)
+    resultado = {
+        'nome': f"{nome_base}{ext}",
+        'dimensao': (solver.rows, solver.cols),
+        'resolvido': False,
+        'valido': False,
+        'bate_gabarito': None,
+        'nodes': 0,
+        'tempo': 0.0,
+    }
+
+    inicio = time.perf_counter()
+    sucesso = solver.solve()
+    resultado['tempo'] = time.perf_counter() - inicio
+    resultado['nodes'] = solver.nodes_visited
+
+    if not sucesso:
+        print(f" -> [ESGOTADO] Nenhuma combinação lógica atende às dicas. O tabuleiro provou-se impossível de ser resolvido de forma válida "
+              f"(Busca levou {resultado['nodes']} nós em {resultado['tempo']:.3f}s).")
+        print("-" * 50)
+        return resultado
+
+    resultado['resolvido'] = True
+    solver.save_solution_to_file(caminho_saida)
+    grid_binario = [[1 if solver.grid[r][c] == BLACK else 0 for c in range(solver.cols)] for r in range(solver.rows)]
+    is_valido, motivo = validar_regras_tapa(grid_binario, solver.clues, solver.rows, solver.cols)
+    resultado['valido'] = is_valido
+
+    if is_valido:
+        print(f" -> [VALIDADO] Matriz gerada bate com todas as regras do Tapa "
+              f"(Busca levou {resultado['nodes']} nós em {resultado['tempo']:.3f}s).")
+    else:
+        print(f" -> [ERRO DO SOLVER] O algoritmo finalizou a matriz, mas ela quebra as regras lógicas. Motivo: {motivo}")
+
+    caminho_gabarito = localizar_gabarito(caminho_problema)
+    if caminho_gabarito:
+        grid_gabarito, erro = carregar_grid_solucao(caminho_gabarito, solver.rows, solver.cols)
+        if erro:
+            print(f" -> [GABARITO INVÁLIDO] '{os.path.basename(caminho_gabarito)}': {erro}")
+        else:
+            bate = grid_binario == grid_gabarito
+            resultado['bate_gabarito'] = bate
+            if bate:
+                print(f" -> [GABARITO] Solução gerada é idêntica ao gabarito '{os.path.basename(caminho_gabarito)}'.")
+            else:
+                print(f" -> [GABARITO] Solução gerada DIFERE do gabarito '{os.path.basename(caminho_gabarito)}' (pode haver mais de uma solução válida).")
+
+    print("-" * 50)
+    return resultado
+
+def testar_dataset_em_lote(pasta_dataset="dataset_tapa", pasta_saida="solucoes_geradas"):
+    if not os.path.isdir(pasta_dataset):
+        print(f"Pasta '{pasta_dataset}' não encontrada (ou não é um diretório).")
+        return
 
     arquivos = glob.glob(os.path.join(pasta_dataset, "*.*"))
     arquivos_problema = [f for f in arquivos if not f.endswith(("_sol.txt", "_sol.csv", "output_gerado.txt"))]
-    
+
     if not arquivos_problema:
         print(f"Nenhum arquivo de problema encontrado na pasta '{pasta_dataset}'.")
         return
 
     total_geral = 0
     corretos_geral = 0
+    bate_gabarito_geral = 0
+    com_gabarito_geral = 0
+    nodes_total = 0
+    tempo_total = 0.0
     benchmark_por_tamanho = {}
 
     print(f"Iniciando testes em tabuleiros...\n")
+    inicio_lote = time.perf_counter()
 
     for arq_prob in arquivos_problema:
-        nome_base, ext = os.path.splitext(os.path.basename(arq_prob))
-        caminho_saida = os.path.join(pasta_saida, f"{nome_base}_output_gerado.txt")
-        
-        print(f"Resolvendo: {nome_base}{ext}")
-        
-        with open(arq_prob, 'r', encoding='utf-8') as f:
-            conteudo = f.read()
-            
-        solver = TapaSolver(conteudo)
-        
-        dimensao = (solver.rows, solver.cols)
+        resultado = resolver_e_verificar(arq_prob, pasta_saida)
+
+        dimensao = resultado['dimensao']
         if dimensao not in benchmark_por_tamanho:
             benchmark_por_tamanho[dimensao] = {'total': 0, 'corretos': 0}
-            
+
         total_geral += 1
         benchmark_por_tamanho[dimensao]['total'] += 1
-        
-        sucesso = solver.solve()
-        
-        if sucesso:
-            solver.save_solution_to_file(caminho_saida)
-            grid_binario = [[1 if solver.grid[r][c] == BLACK else 0 for c in range(solver.cols)] for r in range(solver.rows)]
-            is_valido, motivo = validar_regras_tapa(grid_binario, solver.clues, solver.rows, solver.cols)
-            
-            if is_valido:
-                print(f" -> [VALIDADO] Matriz gerada bate com todas as regras do Tapa (Busca levou {solver.nodes_visited} nós).")
-                corretos_geral += 1
-                benchmark_por_tamanho[dimensao]['corretos'] += 1
-            else:
-                print(f" -> [ERRO DO SOLVER] O algoritmo finalizou a matriz, mas ela quebra as regras lógicas. Motivo: {motivo}")
-        else:
-            print(" -> [ESGOTADO] Nenhuma combinação lógica atende às dicas. O tabuleiro provou-se impossível de ser resolvido de forma válida.")
-        print("-" * 50)
+        nodes_total += resultado['nodes']
+        tempo_total += resultado['tempo']
+
+        if resultado['valido']:
+            corretos_geral += 1
+            benchmark_por_tamanho[dimensao]['corretos'] += 1
+
+        if resultado['bate_gabarito'] is not None:
+            com_gabarito_geral += 1
+            if resultado['bate_gabarito']:
+                bate_gabarito_geral += 1
+
+    tempo_parede = time.perf_counter() - inicio_lote
 
     print("\n" + "=" * 50)
     print("RELATÓRIO DE BENCHMARK FINAL".center(50))
     print("=" * 50)
-    
+
     taxa_global = (corretos_geral / total_geral) * 100 if total_geral > 0 else 0
     print(f"DESEMPENHO GERAL:")
     print(f"Tabuleiros logicamente validados: {corretos_geral} / {total_geral} ({taxa_global:.2f}%)")
+    if com_gabarito_geral > 0:
+        taxa_gabarito = (bate_gabarito_geral / com_gabarito_geral) * 100
+        print(f"Soluções idênticas ao gabarito: {bate_gabarito_geral} / {com_gabarito_geral} ({taxa_gabarito:.2f}%)")
     print("-" * 50)
-    
+    print(f"TEMPO DE EXECUÇÃO:")
+    print(f"Tempo total de busca (soma de solve() por tabuleiro): {tempo_total:.3f}s")
+    print(f"Tempo de parede do lote completo: {tempo_parede:.3f}s")
+    print(f"Total de nós gerados pela busca: {nodes_total}")
+    if total_geral > 0:
+        print(f"Média de nós por tabuleiro: {nodes_total / total_geral:.1f}")
+    print("-" * 50)
+
     print("DESEMPENHO POR PROPORÇÃO (LINHAS x COLUNAS):")
-    for dim, stats in sorted(benchmark_por_tamanho.items()): 
+    for dim, stats in sorted(benchmark_por_tamanho.items()):
         total_cat = stats['total']
         corretos_cat = stats['corretos']
         taxa_cat = (corretos_cat / total_cat) * 100 if total_cat > 0 else 0
         print(f"Tamanho {dim[0]}x{dim[1]}: {corretos_cat} / {total_cat} corretos ({taxa_cat:.2f}%)")
     print("=" * 50 + "\n")
 
+def main():
+    if len(sys.argv) == 2:
+        resolver_e_verificar(sys.argv[1])
+    elif len(sys.argv) == 1:
+        testar_dataset_em_lote(pasta_dataset="dataset_tapa", pasta_saida="solucoes_geradas")
+    else:
+        print("Uso:")
+        print("  python index.py                 -> resolve e verifica todo o 'dataset_tapa/'")
+        print("  python index.py <problema.txt>  -> resolve e verifica um único problema")
+        sys.exit(1)
+
 if __name__ == "__main__":
-    testar_dataset_em_lote(pasta_dataset="dataset_tapa", pasta_saida="solucoes_geradas")
+    main()
