@@ -81,22 +81,50 @@ class TapaSolver:
                 if len(pretas) + len(desconhecidas) < total_exigido: return False
                     
                 estados = [v[2] for v in vizinhos]
-                blocos_confirmados = []
-                contagem = 0
-                for estado in estados:
-                    if estado == BLACK:
-                        contagem += 1
-                    else:
-                        if contagem > 0:
-                            blocos_confirmados.append(contagem)
-                            contagem = 0
-                if contagem > 0:
-                    if estados[0] == BLACK and blocos_confirmados:
-                        blocos_confirmados[0] += contagem
-                    else:
-                        blocos_confirmados.append(contagem)
+                n_viz = len(estados)
 
+                # Agrupa os vizinhos pretos confirmados em segmentos contíguos no
+                # anel circular de 8 vizinhos, guardando também os índices de
+                # início de cada segmento (necessário para a regra de fechamento
+                # de bloco saturado, abaixo).
+                grupos = []
+                if all(estado == BLACK for estado in estados):
+                    grupos = [(0, n_viz)]
+                else:
+                    inicio_varredura = next(i for i in range(n_viz) if estados[i] != BLACK)
+                    contagem = 0
+                    inicio_atual = None
+                    for passo in range(n_viz):
+                        idx = (inicio_varredura + passo) % n_viz
+                        if estados[idx] == BLACK:
+                            if inicio_atual is None:
+                                inicio_atual = idx
+                            contagem += 1
+                        else:
+                            if contagem > 0:
+                                grupos.append((inicio_atual, contagem))
+                            contagem = 0
+                            inicio_atual = None
+                    if contagem > 0:
+                        grupos.append((inicio_atual, contagem))
+
+                blocos_confirmados = [tamanho for _, tamanho in grupos]
                 if any(bloco > max_bloco for bloco in blocos_confirmados): return False
+
+                # Regra de fechamento de bloco saturado: nenhum bloco pode ter
+                # tamanho maior que o maior número da dica, então um segmento
+                # confirmado que já atingiu esse tamanho não pode crescer mais.
+                # As desconhecidas nas pontas desse segmento são forçadas a WHITE
+                # mesmo que o total geral da dica ainda não tenha sido alcançado.
+                for inicio_idx, tamanho in grupos:
+                    if tamanho == max_bloco:
+                        ponta_antes = (inicio_idx - 1) % n_viz
+                        ponta_depois = (inicio_idx + tamanho) % n_viz
+                        for idx in (ponta_antes, ponta_depois):
+                            vr, vc, v_estado = vizinhos[idx]
+                            if v_estado == UNKNOWN and 0 <= vr < self.rows and 0 <= vc < self.cols:
+                                self.grid[vr][vc] = WHITE
+                                mudou = True
 
                 if len(pretas) < total_exigido and (len(pretas) + len(desconhecidas) == total_exigido):
                     for vr, vc, v_estado in desconhecidas:
