@@ -3,6 +3,7 @@ import glob
 import copy
 import sys
 import time
+from collections import Counter
 
 sys.stdout.reconfigure(encoding='utf-8')
 
@@ -111,13 +112,56 @@ class TapaSolver:
                 blocos_confirmados = [tamanho for _, tamanho in grupos]
                 if any(bloco > max_bloco for bloco in blocos_confirmados): return False
 
-                # Regra de fechamento de bloco saturado: nenhum bloco pode ter
-                # tamanho maior que o maior número da dica, então um segmento
-                # confirmado que já atingiu esse tamanho não pode crescer mais.
-                # As desconhecidas nas pontas desse segmento são forçadas a WHITE
-                # mesmo que o total geral da dica ainda não tenha sido alcançado.
+                # Regra de contagem de blocos irreconciliáveis: agrupa os
+                # vizinhos em arcos separados por brancos confirmados (um
+                # branco nunca se torna preto, então arcos diferentes nunca
+                # se fundem). Se já existem mais arcos com pelo menos uma
+                # preta do que a dica permite blocos, é impossível.
+                if all(estado != WHITE for estado in estados):
+                    arcos = [estados]
+                else:
+                    inicio_arco = next(i for i in range(n_viz) if estados[i] == WHITE)
+                    arcos = []
+                    arco_atual = []
+                    for passo in range(n_viz):
+                        idx = (inicio_arco + passo) % n_viz
+                        if estados[idx] == WHITE:
+                            if arco_atual:
+                                arcos.append(arco_atual)
+                                arco_atual = []
+                        else:
+                            arco_atual.append(estados[idx])
+                    if arco_atual:
+                        arcos.append(arco_atual)
+
+                arcos_com_preta = sum(1 for arco in arcos if BLACK in arco)
+                if arcos_com_preta > len(clue): return False
+
+                # Regra de bloco fechado: um grupo de pretas cujas duas
+                # pontas no anel já são brancas confirmadas não pode mais
+                # crescer nem encolher - seu tamanho já é definitivo. O
+                # multiconjunto desses tamanhos fechados precisa caber
+                # dentro do multiconjunto exigido pela dica.
+                tamanhos_fechados = []
                 for inicio_idx, tamanho in grupos:
-                    if tamanho == max_bloco:
+                    ponta_antes = (inicio_idx - 1) % n_viz
+                    ponta_depois = (inicio_idx + tamanho) % n_viz
+                    if vizinhos[ponta_antes][2] == WHITE and vizinhos[ponta_depois][2] == WHITE:
+                        tamanhos_fechados.append(tamanho)
+
+                if Counter(tamanhos_fechados) - Counter(clue): return False
+
+                # Regra de fechamento de bloco saturado: nenhum bloco aberto
+                # pode crescer além do maior valor da dica que ainda não foi
+                # satisfeito por um bloco já fechado (regra acima). Usar o
+                # máximo restante, em vez do máximo global da dica, fecha
+                # blocos mais cedo quando os outros já bateram com valores
+                # específicos.
+                restante = Counter(clue) - Counter(tamanhos_fechados)
+                max_bloco_restante = max(restante) if restante else 0
+
+                for inicio_idx, tamanho in grupos:
+                    if max_bloco_restante > 0 and tamanho == max_bloco_restante:
                         ponta_antes = (inicio_idx - 1) % n_viz
                         ponta_depois = (inicio_idx + tamanho) % n_viz
                         for idx in (ponta_antes, ponta_depois):
@@ -137,6 +181,43 @@ class TapaSolver:
                         if 0 <= vr < self.rows and 0 <= vc < self.cols:
                             self.grid[vr][vc] = WHITE
                             mudou = True
+
+            # Regra de ponte de conectividade: uma célula UNKNOWN adjacente a
+            # uma preta confirmada que, se removida do grafo PRETA+UNKNOWN,
+            # deixa alguma preta confirmada inalcançável a partir das demais
+            # (mesmo supondo que todas as outras desconhecidas virem pretas)
+            # é uma ponte obrigatória - não existe solução válida sem que ela
+            # também seja preta.
+            pretas_atuais = [(r, c) for r in range(self.rows) for c in range(self.cols) if self.grid[r][c] == BLACK]
+            if len(pretas_atuais) > 1:
+                candidatos = set()
+                for (r, c) in pretas_atuais:
+                    for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                        nr, nc = r + dr, c + dc
+                        if 0 <= nr < self.rows and 0 <= nc < self.cols and self.grid[nr][nc] == UNKNOWN:
+                            candidatos.add((nr, nc))
+
+                for (cr, cc) in candidatos:
+                    if self.grid[cr][cc] != UNKNOWN:
+                        continue
+                    visitados = set()
+                    pilha = [pretas_atuais[0]]
+                    while pilha:
+                        r, c = pilha.pop()
+                        if (r, c) in visitados:
+                            continue
+                        visitados.add((r, c))
+                        for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                            nr, nc = r + dr, c + dc
+                            if (nr, nc) == (cr, cc):
+                                continue
+                            if (0 <= nr < self.rows and 0 <= nc < self.cols
+                                    and self.grid[nr][nc] in (BLACK, UNKNOWN)
+                                    and (nr, nc) not in visitados):
+                                pilha.append((nr, nc))
+                    if any(p not in visitados for p in pretas_atuais):
+                        self.grid[cr][cc] = BLACK
+                        mudou = True
         return True
 
     def is_viable_connectivity(self):
@@ -462,7 +543,11 @@ def testar_dataset_em_lote(pasta_dataset="dataset_tapa", pasta_saida="solucoes_g
         return
 
     arquivos = glob.glob(os.path.join(pasta_dataset, "*.*"))
-    arquivos_problema = [f for f in arquivos if not f.endswith(("_sol.txt", "_sol.csv", "output_gerado.txt"))]
+    arquivos_problema = [
+        f for f in arquivos
+        if f.endswith((".txt", ".csv"))
+        and not f.endswith(("_sol.txt", "_sol.csv", "output_gerado.txt"))
+    ]
 
     if not arquivos_problema:
         print(f"Nenhum arquivo de problema encontrado na pasta '{pasta_dataset}'.")
