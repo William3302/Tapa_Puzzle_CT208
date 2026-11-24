@@ -86,18 +86,6 @@ O projeto cresceu em etapas bem distintas, cada uma resolvendo uma limitação e
 7. **Ampliação do dataset com puzzles externos** (`be33244`) — importação de 385 tabuleiros do dataset público [`bluecoconut/pencil-puzzle-bench`](https://huggingface.co/datasets/bluecoconut/pencil-puzzle-bench) (Hugging Face, MIT). Os puzzles originais estavam codificados em URLs no formato puz.link/pzprjs; foram decodificados, convertidos para o CSV do projeto, resolvidos pelo próprio `TapaSolver` e validados com `validar_regras_tapa` antes de entrar no repositório (ver [`dataset_tapa/README.md`](dataset_tapa/README.md)).
 8. **Motor determinístico mais forte e recuperação de puzzles difíceis** (`8158738`) — quatro regras novas de poda (itens 3 a 6 da lista do motor, acima), todas **sem alterar a heurística de escolha de célula** do backtracking. Isso permitiu recuperar 212 dos 268 tabuleiros do dataset externo que antes excediam o tempo limite.
 
-## Benchmarks
-
-Medido com o motor atual, nos 771 tabuleiros do dataset completo (174 originais + 597 do `pencil-puzzle-bench`):
-
-| | Nós de busca | Tempo de parede |
-|---|---|---|
-| Antes das 4 regras de poda mais recentes | 2.396.783 | 1092,1s |
-| Depois | 114.822 | 208,6s |
-| Redução | **-95,2%** | **-80,9%** |
-
-Corretude: **771/771 tabuleiros logicamente válidos** (confirmado por `validar_regras_tapa`, de forma independente do solver).
-
 ### Limitação conhecida
 
 Dos 653 puzzles do dataset externo, **56 ainda não são resolvidos** mesmo com o motor atual e um limite de 120s por tabuleiro — em geral tabuleiros grandes e esparsos (17×17 até 44×44, incluindo um de 10×100). Isso não é falta de tempo: um teste sem limite nenhum mostrou que até um tabuleiro pequeno (9×9) pode travar por quase uma hora, porque a busca por backtracking em Python, sem aprendizado de conflito, tem risco real de explosão combinatória em instâncias específicas, independente do tamanho do tabuleiro.
